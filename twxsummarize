@@ -1,0 +1,63 @@
+#!/bin/bash
+
+MAX_LINES=20
+
+title="\033[0;37m\
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n\
+\n\
+   ,:: twxsummarize ::' summarize thingworx log files  --  by Greg Eva // geva@ptc.com // gregeva@gmail.com\n\
+\n\
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n\
+\033[0m"
+
+header="┌──────────────────────────────────────────────────────┬────────────────────────────────────────────────────────────────┬────────────┬──────────────┐"
+headings="│ THREAD / THREAD POOL                                 │ OBJECT NAME                                                    │ LOG LEVEL  │ OCCURENCES   │"
+separator="├──────────────────────────────────────────────────────┼────────────────────────────────────────────────────────────────┼────────────┼──────────────┤"
+footer="└──────────────────────────────────────────────────────┴────────────────────────────────────────────────────────────────┴────────────┴──────────────┘"
+
+# TO DO:
+# - add a feature to auto-detect the file type (from the name) and adapt the relevant columns to use in accordance (Script: object, obj_instance, Error: thread, ???, Application: object, thread)
+# - add a command line feature to omit or include via RegEx
+
+echo -e "$title"
+
+# Function to display usage
+usage() {
+    echo "Usage: $0 -n | --num-rows <input_files...>"
+    exit 1
+}
+
+# Check if at least 1 arguments are provided
+if [ "$#" -lt 1 ]; then
+    usage
+fi
+
+# Parse command-line arguments
+while [[ "$1" =~ ^- && ! "$1" == "--" ]]; do case $1 in
+  -n | --num-rows )
+    shift; MAX_LINES=$1
+    ;;
+  * )
+    usage
+    ;;
+esac; shift; done
+if [[ "$1" == '--' ]]; then shift; fi
+
+# Collect input files
+input_files=("$@")
+
+# Process input files and write to output file
+for input_file in "${input_files[@]}"; do
+    for file in $input_file; do
+        if [ -f "$file" ]; then
+            echo -e "\033[0;35m$input_file\033[0m"
+    	    echo -e "$header\n$headings\n$separator" 
+            cat ${file} | sed -E 's/\[T: (.+)-[0-9]+\]/[T: \1]/' | perl -pe 's/(?<time>[^ ]* [^ ]*) \[L: (?<level>[^\]]*)] \[O: (?<object>[^\]]*)] \[I: (?<obj_instance>[^\]]*)] \[U: (?<user>[^\]]*)] \[S: (?<session>[^\]]*)] \[P: (?<platformid>[^\]]*)] \[T: (?<thread>[^\]]*)] (?<message>.*)/$+{thread} $+{object} $+{level}/' | sort | uniq -c | sort -rn | head -n ${MAX_LINES:-25} | cut -d\  -f1-4 | awk '{ printf "│  %-50s  │  %-60s  │  %-8s  │  %-10s  │\n", $2, $3, $4, $1; }'
+            echo -e "$footer\n"
+        else
+            echo "Warning: $file not found."
+        fi
+    done
+done
+
+#echo "Processing complete. Output written to $output_file."
