@@ -3,9 +3,11 @@
 /META.yml
 /META.json
 /MYMETA.*
+/logs
 *.o
 *.pm.tdy
 *.bs
+*.log
 
 # Devel::Cover
 cover_db/
