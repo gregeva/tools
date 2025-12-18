@@ -31,12 +31,16 @@ my $omit_same_values = 0;
 my $truncate_after = 50; # characters
 
 GetOptions(
-    'input=s' => \$input_file,
-    'output=s' => \$output_file,
-    'flush-threshold=i' => \$flush_threshold,
-    'flush-window-ms=i' => \$flush_window_ms,
+    'input|i=s' => \$input_file,
+    'output|o=s' => \$output_file,
+    'flush-threshold|ft=i' => \$flush_threshold,
+    'flush-window-ms|fw=i' => \$flush_window_ms,
     'omit-same-values|os' => \$omit_same_values,
     'truncate-after|ta=i' => \$truncate_after,
+    'help|h' => sub {
+        print "Usage: $0 [--input|-i <input_file>] [--output|-o <output_file>] [--flush-threshold|-ft <num>] [--flush-window-ms|-fw <ms>] [--omit-same-values|-os] [--truncate-after|-ta <chars>]\n";
+        exit 0;
+    },
 ) or die "Invalid options\n";
 
 # Initialize CSV (streaming)
