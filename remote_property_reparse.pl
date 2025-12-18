@@ -44,7 +44,7 @@ GetOptions(
 ) or die "Invalid options\n";
 
 # Initialize CSV (streaming)
-my $csv = Text::CSV->new({ binary => 1, eol => $/ });
+my $csv = Text::CSV->new({ sep_char => ';', binary => 1, eol => $/ });
 open my $fh, '>', $output_file or die "Could not open $output_file: $!";
 $csv->print($fh, ['serverTimestamp', 'propertyTimestamp', 'thingName', 'property', 'quality', 'hasChanged', 'timeSinceLastValueChangeS', 'byteSize', 'value']);
 
