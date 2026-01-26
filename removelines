@@ -1,0 +1,39 @@
+#!/bin/bash
+
+title="\033[0;37m\
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n\
+\n\
+   ,:: removelogs ::' remove matching lines from logs  --  by Greg Eva // geva@ptc.com // gregeva@gmail.com\n\
+\n\
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n\
+\033[0m"
+
+echo -e "$title"
+
+# Assign command-line arguments to variables
+directory=$1
+file_pattern=$2
+
+# Function to display usage
+
+usage() {
+    echo "Usage: $0 directory file_pattern $directory $file_pattern"
+    exit 1
+}
+
+# Check if at least 3 arguments are provided
+if [ "$#" -ne 2 ]; then
+    usage
+fi
+
+# Function to escape special characters
+escape_special_characters() {
+    local input="$1"
+    echo "$input" | sed -e 's/[]\/$*.^[]/\\&/g'
+}
+
+# Read each pattern from standard input and remove matching lines
+while IFS= read -r pattern; do
+    escaped_pattern=$(escape_special_characters "$pattern")
+    find "$directory" -type f -name "$file_pattern" -exec sed -i "/$pattern/d" {} +
+done

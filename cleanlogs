@@ -1,0 +1,73 @@
+#!/bin/bash
+
+title="\033[0;37m\
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n\
+\n\
+   ,:: cleanlogs ::' remove stack traces, health probe requests, partial lines  --  by Greg Eva // geva@ptc.com || gregeva@gmail.com\n\
+\n\
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n\
+\033[0m"
+
+echo -e "$title"
+
+
+# TO DO: Add options for things to be removed like stack traces, health probe lines, chose different timestamp formats
+
+# Function to display usage
+usage() {
+    echo "Usage: $0 -o |i --output <output_file> <input_files...>"
+    exit 1
+}
+
+# Check if at least 3 arguments are provided
+if [ "$#" -lt 3 ]; then
+    usage
+fi
+
+# Parse command-line arguments
+while [[ "$1" =~ ^- && ! "$1" == "--" ]]; do case $1 in
+  -o | --output )
+    shift; output_file=$1
+    ;;
+  * )
+    usage
+    ;;
+esac; shift; done
+if [[ "$1" == '--' ]]; then shift; fi
+
+# Check if output file is specified
+if [ -z "$output_file" ]; then
+    usage
+fi
+
+# Collect input files
+input_files=("$@")
+
+# Process input files and write to output file
+
+if [ -f "$output_file" ]; then
+    read -p "Output file $output_file already exists.  Do you want to delete it? (y/n): " choice
+    case "$choice" in
+        y|Y ) rm "$output_file"; echo "File '$output_file' deleted.";;
+        n|N ) echo "File '$output_file' not deleted.";;
+        * ) echo "Invalid choice. File '$output_file' not deleted.";;
+    esac
+fi
+
+for input_file in "${input_files[@]}"; do
+    for file in $input_file; do
+        echo "  Processing: $input_file ..."
+        if [ -f "$file" ]; then
+            # REMOVE stack traces, split lines, incomplete or corrupted lines
+            cat "$file" | \
+            grep -vE '(^Wrapped by: |\.\.\. \d+ common frames omitted|\sat .*\(.*\))' | \
+            LC_ALL=C sed 's/.*\([0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\} [0-9]\{2\}:[0-9]\{2\}:[0-9]\{2\}\.[0-9]\{3\}+[0-9]\{4\}\)/\1/' | \
+            grep -E '^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}.\d{3}\+\d{4} \D' \
+            >> "$output_file"
+        else
+            echo "Warning: $file not found."
+        fi
+    done
+done
+
+echo "Input file cleaning complete. Output written to $output_file."
