@@ -86,9 +86,21 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         -*)
-            echo -e "${RED}Error: Unknown option: $1${NC}"
-            echo "Use --help for usage information."
-            exit 1
+            # Check if this might be a file starting with dash
+            if [ -f "$1" ]; then
+                if [ -z "$JFR_FILE" ]; then
+                    JFR_FILE="$1"
+                else
+                    echo -e "${RED}Error: Unexpected argument: $1${NC}"
+                    echo "Use --help for usage information."
+                    exit 1
+                fi
+            else
+                echo -e "${RED}Error: Unknown option: $1${NC}"
+                echo "Use --help for usage information."
+                exit 1
+            fi
+            shift
             ;;
         *)
             if [ -z "$JFR_FILE" ]; then
@@ -199,21 +211,33 @@ analyze_events() {
         bucket_larger = 0
     }
 
-    # Parse duration from string like "161.874 ms" or "10.248 ms" or "1.5 s"
-    function parse_duration_ns(str) {
-        gsub(/[^0-9. a-z]/, "", str)
-        if (match(str, /([0-9.]+) *ns/, arr)) {
-            return arr[1]
-        } else if (match(str, /([0-9.]+) *us/, arr)) {
-            return arr[1] * 1000
-        } else if (match(str, /([0-9.]+) *ms/, arr)) {
-            return arr[1] * 1000000
-        } else if (match(str, /([0-9.]+) *s/, arr)) {
-            return arr[1] * 1000000000
+    # Parse duration from string like "PT0.016813081S" (ISO 8601) or "161.874 ms"
+    # Compatible with BSD awk (macOS) - no capture groups in match()
+    function parse_duration_ns(str,    num, unit) {
+        # Handle ISO 8601 duration format: PT0.016813081S (seconds)
+        if (match(str, /PT[0-9.]+S/)) {
+            num = substr(str, RSTART + 2, RLENGTH - 3) + 0  # Skip "PT" and "S"
+            return num * 1000000000  # Convert seconds to nanoseconds
         }
-        # Try to extract just the number if no unit
-        if (match(str, /([0-9.]+)/, arr)) {
-            return arr[1] * 1000000  # Assume ms if no unit
+
+        gsub(/[^0-9. a-z]/, "", str)
+        # Extract the numeric part
+        if (match(str, /[0-9.]+/)) {
+            num = substr(str, RSTART, RLENGTH) + 0
+            # Get the rest after the number to find the unit
+            unit = substr(str, RSTART + RLENGTH)
+            gsub(/^ */, "", unit)  # trim leading spaces
+            if (unit ~ /^ns/) {
+                return num
+            } else if (unit ~ /^us/) {
+                return num * 1000
+            } else if (unit ~ /^ms/) {
+                return num * 1000000
+            } else if (unit ~ /^s/) {
+                return num * 1000000000
+            }
+            # No unit found, assume ms
+            return num * 1000000
         }
         return 0
     }
@@ -232,27 +256,104 @@ analyze_events() {
         else bucket_larger++
     }
 
-    /"path"/ {
-        # Extract path value
-        match($0, /"path" *: *"([^"]*)"/, arr)
-        if (arr[1] != "") {
-            current_path = arr[1]
+    # Format bytes for display
+    function format_bytes(b) {
+        if (b >= 1073741824) return sprintf("%.2f GiB", b / 1073741824)
+        if (b >= 1048576) return sprintf("%.2f MiB", b / 1048576)
+        if (b >= 1024) return sprintf("%.2f KiB", b / 1024)
+        return sprintf("%d B", b)
+    }
+
+    # Format duration for display
+    function format_duration(ns) {
+        if (ns >= 1000000000) return sprintf("%.3f s", ns / 1000000000)
+        if (ns >= 1000000) return sprintf("%.3f ms", ns / 1000000)
+        if (ns >= 1000) return sprintf("%.3f us", ns / 1000)
+        return sprintf("%.0f ns", ns)
+    }
+
+    # Process a complete event
+    function process_event(    duration_ns, bytes) {
+        # Apply path filter if specified
+        path_matches = (path_filter == "" || index(current_path, path_filter) > 0)
+
+        # Apply stack trace filter if specified
+        stack_matches = (stack_filter == "" || index(current_stack_trace, stack_filter) > 0)
+
+        if (path_matches && stack_matches) {
+            duration_ns = parse_duration_ns(current_duration_str)
+            bytes = current_bytes + 0
+
+            if (duration_ns > 0 || bytes > 0) {
+                count++
+                total_bytes += bytes
+                total_duration_ns += duration_ns
+
+                if (min_duration_ns < 0 || duration_ns < min_duration_ns) min_duration_ns = duration_ns
+                if (duration_ns > max_duration_ns) max_duration_ns = duration_ns
+
+                if (min_bytes < 0 || bytes < min_bytes) min_bytes = bytes
+                if (bytes > max_bytes) max_bytes = bytes
+
+                # Store for percentile (limited to first 10000)
+                if (duration_count < 10000) {
+                    durations[duration_count] = duration_ns
+                    duration_count++
+                }
+
+                # Categorize block size
+                categorize_bytes(bytes)
+
+                # Track per-path statistics
+                path_ops[current_path]++
+                path_bytes[current_path] += bytes
+                path_duration[current_path] += duration_ns
+            }
         }
     }
 
-    /bytesRead|bytesWritten/ {
-        match($0, /: *([0-9]+)/, arr)
-        if (arr[1] != "") {
-            current_bytes = arr[1] + 0
-        }
-    }
-
+    # Capture duration (comes before path in JSON)
     /"duration"/ {
-        # Extract duration - handle both string format and PT format
-        if (match($0, /"duration" *: *"([^"]*)"/, arr)) {
-            current_duration_str = arr[1]
-        } else if (match($0, /"duration" *: *([0-9.]+)/, arr)) {
-            current_duration_str = arr[1] " ns"
+        # Extract duration - handle both string format and numeric format (BSD awk compatible)
+        if (match($0, /"duration" *: *"[^"]*"/)) {
+            current_duration_str = substr($0, RSTART, RLENGTH)
+            gsub(/^"duration" *: *"/, "", current_duration_str)
+            gsub(/"$/, "", current_duration_str)
+        } else if (match($0, /"duration" *: *[0-9.]+/)) {
+            current_duration_str = substr($0, RSTART, RLENGTH)
+            gsub(/^"duration" *: */, "", current_duration_str)
+            current_duration_str = current_duration_str " ns"
+        }
+    }
+
+    # Capture path (comes after duration in JSON)
+    /"path"/ {
+        # Extract path value (BSD awk compatible)
+        if (match($0, /"path" *: *"[^"]*"/)) {
+            current_path = substr($0, RSTART, RLENGTH)
+            # Remove the "path" : " prefix and trailing "
+            gsub(/^"path" *: *"/, "", current_path)
+            gsub(/"$/, "", current_path)
+        }
+    }
+
+    # Capture bytes (comes last in JSON) - this triggers event processing
+    /bytesRead|bytesWritten/ {
+        # Extract bytes value (BSD awk compatible)
+        if (match($0, /: *[0-9]+/)) {
+            current_bytes = substr($0, RSTART, RLENGTH)
+            gsub(/^: */, "", current_bytes)
+            current_bytes = current_bytes + 0
+
+            # Process event now that we have all fields
+            if (current_path != "" && current_duration_str != "") {
+                process_event()
+            }
+            # Reset for next event
+            current_path = ""
+            current_bytes = ""
+            current_duration_str = ""
+            current_stack_trace = ""
         }
     }
 
@@ -267,10 +368,12 @@ analyze_events() {
         current_stack_trace = current_stack_trace $0 "\n"
 
         # Detect end of stack trace (closing of stackTrace object)
-        # Count braces to handle nested structures
-        gsub(/[^{]/, "", temp = $0)
+        # Count braces to handle nested structures (BSD awk compatible)
+        temp = $0
+        gsub(/[^{]/, "", temp)
         stack_brace_count += length(temp)
-        gsub(/[^}]/, "", temp = $0)
+        temp = $0
+        gsub(/[^}]/, "", temp)
         stack_brace_count -= length(temp)
 
         if (stack_brace_count <= 0 && current_stack_trace != "") {
@@ -279,66 +382,23 @@ analyze_events() {
         }
     }
 
-    # Also capture method names and class names from stack frames
+    # Also capture method names and class names from stack frames (BSD awk compatible)
     /"method"/ {
-        if (match($0, /"method" *: *"([^"]*)"/, arr)) {
-            current_stack_trace = current_stack_trace " " arr[1]
+        if (match($0, /"method" *: *"[^"]*"/)) {
+            method_val = substr($0, RSTART, RLENGTH)
+            gsub(/^"method" *: *"/, "", method_val)
+            gsub(/"$/, "", method_val)
+            current_stack_trace = current_stack_trace " " method_val
         }
     }
 
     /"type"/ {
-        if (match($0, /"type" *: *"([^"]*)"/, arr)) {
-            current_stack_trace = current_stack_trace " " arr[1]
+        if (match($0, /"type" *: *"[^"]*"/)) {
+            type_val = substr($0, RSTART, RLENGTH)
+            gsub(/^"type" *: *"/, "", type_val)
+            gsub(/"$/, "", type_val)
+            current_stack_trace = current_stack_trace " " type_val
         }
-    }
-
-    # End of an event block - process accumulated values
-    /\}/ {
-        if (current_path != "" && current_bytes != "" && current_duration_str != "") {
-            # Apply path filter if specified
-            path_matches = (path_filter == "" || index(current_path, path_filter) > 0)
-
-            # Apply stack trace filter if specified
-            stack_matches = (stack_filter == "" || index(current_stack_trace, stack_filter) > 0)
-
-            if (path_matches && stack_matches) {
-                duration_ns = parse_duration_ns(current_duration_str)
-                bytes = current_bytes + 0
-
-                if (duration_ns > 0 || bytes > 0) {
-                    count++
-                    total_bytes += bytes
-                    total_duration_ns += duration_ns
-
-                    if (min_duration_ns < 0 || duration_ns < min_duration_ns) min_duration_ns = duration_ns
-                    if (duration_ns > max_duration_ns) max_duration_ns = duration_ns
-
-                    if (min_bytes < 0 || bytes < min_bytes) min_bytes = bytes
-                    if (bytes > max_bytes) max_bytes = bytes
-
-                    # Store for percentile (limited to first 10000)
-                    if (duration_count < 10000) {
-                        durations[duration_count] = duration_ns
-                        duration_count++
-                    }
-
-                    # Categorize block size
-                    categorize_bytes(bytes)
-
-                    # Track per-path statistics
-                    path_ops[current_path]++
-                    path_bytes[current_path] += bytes
-                    path_duration[current_path] += duration_ns
-                }
-            }
-        }
-        # Reset for next event
-        current_path = ""
-        current_bytes = ""
-        current_duration_str = ""
-        current_stack_trace = ""
-        in_stack_trace = 0
-        stack_brace_count = 0
     }
 
     END {
@@ -378,22 +438,6 @@ analyze_events() {
 
         avg_duration_ns = (count > 0) ? total_duration_ns / count : 0
         avg_bytes = (count > 0) ? total_bytes / count : 0
-
-        # Format bytes for display
-        function format_bytes(b) {
-            if (b >= 1073741824) return sprintf("%.2f GiB", b / 1073741824)
-            if (b >= 1048576) return sprintf("%.2f MiB", b / 1048576)
-            if (b >= 1024) return sprintf("%.2f KiB", b / 1024)
-            return sprintf("%d B", b)
-        }
-
-        # Format duration for display
-        function format_duration(ns) {
-            if (ns >= 1000000000) return sprintf("%.3f s", ns / 1000000000)
-            if (ns >= 1000000) return sprintf("%.3f ms", ns / 1000000)
-            if (ns >= 1000) return sprintf("%.3f us", ns / 1000)
-            return sprintf("%.0f ns", ns)
-        }
 
         print BOLD "----------------------------------------" NC
         print BOLD event_type " Statistics" NC
